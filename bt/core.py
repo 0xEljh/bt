@@ -1943,6 +1943,72 @@ class CouponPayingHedgeSecurity(CouponPayingSecurity):
         self._notl_value = 0.0
         self._notl_values.values.fill(0.0)
 
+class SlippageSecurity(SecurityBase):
+    def __init__(self, name, slippage_model, multiplier=1):
+        super(SlippageSecurity, self).__init__(name, multiplier)
+        self._daily_volume = None
+        self.slippage_model = slippage_model
+
+    def setup(self, universe, **kwargs):
+        super(SlippageSecurity, self).setup(universe, **kwargs)
+
+        # Ensure daily_volume is passed in kwargs
+        if "daily_volume" not in kwargs:
+            raise Exception(
+                '"daily_volume" must be passed to setup for SlippageSecurity'
+            )
+
+        # Assign daily_volume to attribute
+        self._daily_volume = kwargs["daily_volume"][self.name]
+        # volume and price must have the same index
+        # assert self._daily_volume.index.equals(self.data.index)
+
+    def apply_slippage(self, transaction_size):
+        date = self.now
+        # inow = self.data.index.get_loc(date)
+
+        # Retrieve daily volume for the given date
+        # use .loc instead of .iloc to avoid index mismatch; different from _price
+        daily_volume = self._daily_volume.loc[date]
+
+        # Calculate the slippage percentage using the provided slippage model
+        slippage_percentage = self.slippage_model(transaction_size, daily_volume)
+        if pd.isnull(slippage_percentage):
+            raise ValueError("slippage_percentage is nan; check slippage model")
+        # Adjust bid/offer prices based on slippage
+        self._bidoffer = (
+            self._price * (slippage_percentage) * 2
+        )  # must be multiplied by 2 to get bid/offer spread
+
+    def outlay(self, q, p=None):
+        """
+        Determines the complete cash outlay (including commission and slippage) necessary
+        given a quantity q.
+        Second returning parameter is a commission itself.
+
+        Args:
+            * q (float): quantity
+            * p (float): price override
+        """
+        transaction_size = q * self._price * self.multiplier
+        if p is None:
+            fee = self.commission(q, self._price * self.multiplier)
+            self.apply_slippage(transaction_size)
+            bidoffer = abs(q) * 0.5 * self._bidoffer * self.multiplier
+        else:
+            # price override provided: custom transaction
+            fee = self.commission(q, p * self.multiplier)
+            bidoffer = q * (p - self._price) * self.multiplier
+
+        outlay = q * self._price * self.multiplier + bidoffer
+        # there should be no nan outlay values
+        if pd.isnull(outlay):
+            print(
+                outlay, fee, bidoffer, q, self._price, self._bidoffer, transaction_size
+            )
+            raise ValueError("outlay is nan")
+        return outlay + fee, outlay, fee, bidoffer
+
 
 class Algo(object):
 
